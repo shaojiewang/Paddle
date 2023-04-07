@@ -16,10 +16,8 @@ limitations under the License. */
 #include "paddle/fluid/framework/convert_utils.h"
 #include "paddle/fluid/framework/eigen.h"
 #include "paddle/fluid/framework/op_registry.h"
-#include "paddle/fluid/platform/device/gpu/gpu_primitives.h"
 #include "paddle/fluid/platform/float16.h"
-
-DECLARE_bool(cudnn_deterministic);
+#include "paddle/phi/backends/gpu/gpu_primitives.h"
 
 namespace paddle {
 namespace operators {
@@ -79,45 +77,18 @@ __global__ void CEmbeddingGrad(T *table,
     auto id = ids[row];
     if (id >= start_idx && id < end_idx) {
       auto real_idx = id - start_idx;
-      paddle::platform::CudaAtomicAdd(&table[real_idx * columns + col],
-                                      output[i]);
+      phi::CudaAtomicAdd(&table[real_idx * columns + col], output[i]);
     }
   }
 }
 
-template <typename T, typename IndexT>
-__global__ void CEmbeddingGradSerial(T *table,
-                                     const T *output,
-                                     const IndexT *ids,
-                                     const int rows,
-                                     const int columns,
-                                     const int64_t N,
-                                     const int64_t start_idx,
-                                     const int64_t end_idx,
-                                     const int64_t limit) {
-  CUDA_KERNEL_LOOP(i, limit) {
-    if (i == 0) {
-      for (int j = 0; j < limit; j++) {
-        size_t row = j / columns;
-        size_t col = j % columns;
-        auto id = ids[row];
-        if (id >= start_idx && id < end_idx) {
-          auto real_idx = id - start_idx;
-          paddle::platform::CudaAtomicAdd(&table[real_idx * columns + col],
-                                          output[i]);
-        }
-      }
-    }
-  }
-}
-
-template <typename T>
+template <typename T, typename DeviceContext>
 class CEmbeddingCUDAKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext &context) const override {
-    auto *table_t = context.Input<LoDTensor>("W");
-    auto *ids_t = context.Input<LoDTensor>("Ids");
-    auto *output_t = context.Output<LoDTensor>("Out");
+    auto *table_t = context.Input<phi::DenseTensor>("W");
+    auto *ids_t = context.Input<phi::DenseTensor>("Ids");
+    auto *output_t = context.Output<phi::DenseTensor>("Out");
 
     const auto &dev_ctx = context.template device_context<phi::GPUContext>();
     const int64_t start_idx = context.Attr<int64_t>("start_index");
@@ -165,15 +136,17 @@ class CEmbeddingCUDAKernel : public framework::OpKernel<T> {
   }
 };
 
-template <typename T>
+template <typename T, typename DeviceContext>
 class CEmbeddingGradCUDAKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext &context) const override {
     const auto &dev_ctx = context.template device_context<phi::GPUContext>();
     const int64_t start_idx = context.Attr<int64_t>("start_index");
-    auto ids_t = context.Input<LoDTensor>("Ids");
-    auto d_output_t = context.Input<LoDTensor>(framework::GradVarName("Out"));
-    auto d_table_t = context.Output<LoDTensor>(framework::GradVarName("W"));
+    auto ids_t = context.Input<phi::DenseTensor>("Ids");
+    auto d_output_t =
+        context.Input<phi::DenseTensor>(framework::GradVarName("Out"));
+    auto d_table_t =
+        context.Output<phi::DenseTensor>(framework::GradVarName("W"));
 
     int N = d_table_t->dims()[0];
     int D = d_table_t->dims()[1];
@@ -191,56 +164,28 @@ class CEmbeddingGradCUDAKernel : public framework::OpKernel<T> {
     t.device(*dev_ctx.eigen_device()) = t.constant(static_cast<T>(0));
 
     const auto &index_type = framework::TransToProtoVarType(ids_t->dtype());
-    if (FLAGS_cudnn_deterministic) {
-      VLOG(2) << "Run grad kernel of embedding with single thread.";
-      blocks = 1;
-      if (index_type == framework::proto::VarType::INT32) {
-        CEmbeddingGradSerial<T, int32_t>
-            <<<blocks, threads, 0, dev_ctx.stream()>>>(d_table,
-                                                       d_output,
-                                                       ids_t->data<int32_t>(),
-                                                       K,
-                                                       D,
-                                                       N,
-                                                       start_idx,
-                                                       end_idx,
-                                                       limit);
-      } else if (index_type == framework::proto::VarType::INT64) {
-        CEmbeddingGradSerial<T, int64_t>
-            <<<blocks, threads, 0, dev_ctx.stream()>>>(d_table,
-                                                       d_output,
-                                                       ids_t->data<int64_t>(),
-                                                       K,
-                                                       D,
-                                                       N,
-                                                       start_idx,
-                                                       end_idx,
-                                                       limit);
-      }
-    } else {
-      if (index_type == framework::proto::VarType::INT32) {
-        CEmbeddingGrad<T, int32_t>
-            <<<blocks, threads, 0, dev_ctx.stream()>>>(d_table,
-                                                       d_output,
-                                                       ids_t->data<int32_t>(),
-                                                       K,
-                                                       D,
-                                                       N,
-                                                       start_idx,
-                                                       end_idx,
-                                                       limit);
-      } else if (index_type == framework::proto::VarType::INT64) {
-        CEmbeddingGrad<T, int64_t>
-            <<<blocks, threads, 0, dev_ctx.stream()>>>(d_table,
-                                                       d_output,
-                                                       ids_t->data<int64_t>(),
-                                                       K,
-                                                       D,
-                                                       N,
-                                                       start_idx,
-                                                       end_idx,
-                                                       limit);
-      }
+    if (index_type == framework::proto::VarType::INT32) {
+      CEmbeddingGrad<T, int32_t>
+          <<<blocks, threads, 0, dev_ctx.stream()>>>(d_table,
+                                                     d_output,
+                                                     ids_t->data<int32_t>(),
+                                                     K,
+                                                     D,
+                                                     N,
+                                                     start_idx,
+                                                     end_idx,
+                                                     limit);
+    } else if (index_type == framework::proto::VarType::INT64) {
+      CEmbeddingGrad<T, int64_t>
+          <<<blocks, threads, 0, dev_ctx.stream()>>>(d_table,
+                                                     d_output,
+                                                     ids_t->data<int64_t>(),
+                                                     K,
+                                                     D,
+                                                     N,
+                                                     start_idx,
+                                                     end_idx,
+                                                     limit);
     }
   }
 };
@@ -250,11 +195,27 @@ class CEmbeddingGradCUDAKernel : public framework::OpKernel<T> {
 
 namespace ops = paddle::operators;
 namespace plat = paddle::platform;
-REGISTER_OP_CUDA_KERNEL(c_embedding,
-                        ops::CEmbeddingCUDAKernel<float>,
-                        ops::CEmbeddingCUDAKernel<double>,
-                        ops::CEmbeddingCUDAKernel<plat::float16>);
-REGISTER_OP_CUDA_KERNEL(c_embedding_grad,
-                        ops::CEmbeddingGradCUDAKernel<float>,
-                        ops::CEmbeddingGradCUDAKernel<double>,
-                        ops::CEmbeddingGradCUDAKernel<plat::float16>);
+
+PD_REGISTER_STRUCT_KERNEL(c_embedding,
+                          GPU,
+                          ALL_LAYOUT,
+                          ops::CEmbeddingCUDAKernel,
+                          float,
+                          double,
+#if NCCL_VERSION_CODE >= 21000
+                          plat::bfloat16,
+#endif
+                          plat::float16) {
+}
+
+PD_REGISTER_STRUCT_KERNEL(c_embedding_grad,
+                          GPU,
+                          ALL_LAYOUT,
+                          ops::CEmbeddingGradCUDAKernel,
+                          float,
+                          double,
+#if NCCL_VERSION_CODE >= 21000
+                          plat::bfloat16,
+#endif
+                          plat::float16) {
+}

@@ -16,7 +16,7 @@ limitations under the License. */
 
 #include "paddle/fluid/operators/collective/c_split_op.h"
 #include "paddle/fluid/operators/math/concat_and_split.h"
-#include "paddle/fluid/platform/device/gpu/gpu_primitives.h"
+#include "paddle/phi/backends/gpu/gpu_primitives.h"
 
 namespace paddle {
 namespace operators {
@@ -52,12 +52,12 @@ __global__ void SplitFromRank(const T* input,
   }
 }
 
-template <typename T>
+template <typename T, typename DeviceContext>
 class CSplitOpCUDAKernel : public framework::OpKernel<T> {
  public:
   void Compute(const framework::ExecutionContext& ctx) const override {
-    auto x = ctx.Input<framework::Tensor>("X");
-    auto out = ctx.Output<framework::Tensor>("Out");
+    auto x = ctx.Input<phi::DenseTensor>("X");
+    auto out = ctx.Output<phi::DenseTensor>("Out");
 
     int nranks = ctx.Attr<int>("nranks");
     int rank = ctx.Attr<int>("rank");
@@ -115,9 +115,16 @@ class CSplitOpCUDAKernel : public framework::OpKernel<T> {
 namespace ops = paddle::operators;
 namespace plat = paddle::platform;
 
-REGISTER_OP_CUDA_KERNEL(c_split,
-                        ops::CSplitOpCUDAKernel<float>,
-                        ops::CSplitOpCUDAKernel<double>,
-                        ops::CSplitOpCUDAKernel<int>,
-                        ops::CSplitOpCUDAKernel<int64_t>,
-                        ops::CSplitOpCUDAKernel<plat::float16>);
+PD_REGISTER_STRUCT_KERNEL(c_split,
+                          GPU,
+                          ALL_LAYOUT,
+                          ops::CSplitOpCUDAKernel,
+                          float,
+                          double,
+                          int,
+                          int64_t,
+#if NCCL_VERSION_CODE >= 21000
+                          plat::bfloat16,
+#endif
+                          plat::float16) {
+}
