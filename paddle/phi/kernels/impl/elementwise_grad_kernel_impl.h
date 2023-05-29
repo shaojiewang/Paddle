@@ -913,10 +913,22 @@ compute_pow_grad_dx(T x, T y, T out, T dout) {
 template <typename T, typename MPType>
 HOSTDEVICE typename std::enable_if<!std::is_integral<T>::value, T>::type
 compute_pow_grad_dx(T x, T y, T out, T dout) {
+#if 0
   MPType x_val = static_cast<MPType>(x);
   MPType y_val = static_cast<MPType>(y);
   return static_cast<T>(static_cast<MPType>(dout) * y_val *
                         std::pow(x_val, y_val - 1));
+#else
+  MPType x_val = static_cast<MPType>(x);
+  MPType y_val = static_cast<MPType>(y);
+  T y_minus_1 = y - static_cast<T>(1.0);
+  MPType f_y_minus_1 = static_cast<MPType>(y_minus_1);
+  T pow_x_y_1 = static_cast<T>(std::pow(x_val, f_y_minus_1));
+  T y_mul_pow = static_cast<T>(y_val * static_cast<MPType>(pow_x_y_1));
+  T res = static_cast<T>(static_cast<MPType>(dout) *
+                         static_cast<MPType>(y_mul_pow));
+  return static_cast<T>(res);
+#endif
 }
 template <typename T, typename MPType>
 HOSTDEVICE typename std::enable_if<std::is_integral<T>::value, T>::type
@@ -927,10 +939,22 @@ compute_pow_grad_dy(T x, T y, T out, T dout) {
 template <typename T, typename MPType>
 HOSTDEVICE typename std::enable_if<!std::is_integral<T>::value, T>::type
 compute_pow_grad_dy(T x, T y, T out, T dout) {
+#if 0
   MPType x_val = static_cast<MPType>(x);
   MPType y_val = static_cast<MPType>(y);
   return static_cast<T>(static_cast<MPType>(dout) * std::log(x_val) *
                         std::pow(x_val, y_val));
+#else
+  MPType x_val = static_cast<MPType>(x);
+  MPType y_val = static_cast<MPType>(y);
+  T pow_res = static_cast<T>(std::pow(x_val, y_val));
+  T log_res = static_cast<T>(std::log(x_val));
+  T pow_x_log = static_cast<T>(static_cast<MPType>(pow_res) *
+                               static_cast<MPType>(log_res));
+  T dout_x_pow_x_log = static_cast<T>(static_cast<MPType>(dout) *
+                                      static_cast<MPType>(pow_x_log));
+  return dout_x_pow_x_log;
+#endif
 }
 #else
 template <typename T, typename MPType>
